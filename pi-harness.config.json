@@ -1,0 +1,8 @@
+{
+  "$comment": "Toggle individual treatments. Mirrors the benchmark's treatment flags so ablation runs can disable any single extension.",
+  "briefing": true,
+  "verify_gate": true,
+  "output_hygiene": true,
+  "terse_edits": true,
+  "plan_first": true
+}

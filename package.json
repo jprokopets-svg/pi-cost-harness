@@ -1,0 +1,11 @@
+{
+  "name": "pi-cost-harness",
+  "version": "0.1.0",
+  "description": "Benchmark-winning treatments as Pi extension hooks — briefing, verify-gate, output-hygiene, terse-edits, plan-first.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "dependencies": {}
+}
