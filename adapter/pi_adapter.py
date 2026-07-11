@@ -63,11 +63,15 @@ class PiAdapter(AgentAdapter):
             when stdout is piped.
         --mode json: emit every event as a JSONL line to stdout.
         --no-session: don't persist session state (ephemeral run).
+        --model: required — without it Pi falls back to the saved
+            subscription provider, which may be out of usage.
         """
-        cmd = ["pi", "-p", "--mode", "json", "--no-session"]
-        if model:
-            cmd.extend(["--model", model])
-        cmd.append(prompt)
+        # Resolve model: explicit arg > PI_MODEL env var > default.
+        resolved_model = model or os.environ.get(
+            "PI_MODEL", "deepseek/deepseek-v4-flash"
+        )
+        cmd = ["pi", "-p", "--mode", "json", "--no-session",
+               "--model", resolved_model, prompt]
         return cmd
 
     def run(
@@ -82,6 +86,10 @@ class PiAdapter(AgentAdapter):
         env = self._build_env()
         if env_override:
             env.update(env_override)
+
+        # Print the exact command for reproducibility.
+        import shlex
+        print(f"[pi-adapter] cmd: {shlex.join(cmd)}", file=sys.stderr)
 
         t0 = time.time()
         try:

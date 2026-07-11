@@ -156,11 +156,15 @@ def main():
         "Run `python -m pytest -x -q test_calculator.py` to confirm."
     )
 
+    # Model: explicit env var > default (deepseek/deepseek-v4-flash).
+    model = os.environ.get("PI_MODEL", "deepseek/deepseek-v4-flash")
+    print(f"Model: {model}")
+
     adapter = PiAdapter()
     result = adapter.run(
         prompt=prompt,
         workdir=testbed,
-        model="",  # Use Pi's default model.
+        model=model,
         timeout_s=120,
     )
 
