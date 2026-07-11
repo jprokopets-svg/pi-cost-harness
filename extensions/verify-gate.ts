@@ -114,11 +114,13 @@ export default function (pi: ExtensionAPI) {
     if (config.verify_gate === false) return;
 
     // Only gate on messages that look like "I'm done" signals.
-    const text = event.message?.content
-      ?.filter((b: any) => b.type === "text")
+    const content = event.message?.content;
+    const blocks = Array.isArray(content) ? content : [];
+    const text = blocks
+      .filter((b: any) => b.type === "text")
       .map((b: any) => b.text)
       .join(" ")
-      .toLowerCase() || "";
+      .toLowerCase();
 
     const doneSignals = ["complete", "done", "finished", "all set", "ready for review"];
     const looksLikeDone = doneSignals.some((s) => text.includes(s));
