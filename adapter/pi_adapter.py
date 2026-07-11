@@ -1,22 +1,24 @@
 """Pi agent adapter for the benchmark harness.
 
-Uses `pi --mode json` (JSONL output) to capture per-turn usage, tool calls,
-and wall time. Returns the same AgentResult contract as claude_code.py and
-codex.py so Pi is directly comparable in cross-agent benchmark runs.
+Uses `pi -p --mode json` (non-interactive JSONL output) to capture per-turn
+usage, tool calls, and wall time. Returns the same AgentResult contract as
+claude_code.py and codex.py so Pi is directly comparable in cross-agent
+benchmark runs.
 
 Pi's JSON mode emits events as newline-delimited JSON. Key event types:
-  - session          : session header (version, id)
-  - turn_end         : per-turn message + tool results
-  - message_end      : assistant message with content blocks
-  - tool_execution_*  : tool call lifecycle
-  - agent_end        : final messages array
+  - session            : session header (version, id)
+  - turn_end           : per-turn message + tool results
+  - message_end        : assistant message with content blocks + usage
+  - tool_execution_end : tool call completed
+  - agent_end          : final messages array
 
-Usage fields come from message_end events (message.usage) and/or a
-dedicated usage event if the provider surfaces one.
+Pi's usage fields use camelCase (input, output, cacheRead, cacheWrite,
+totalTokens), NOT the snake_case names used by the Anthropic API.
 """
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -37,34 +39,34 @@ class PiAdapter(AgentAdapter):
         self,
         env: dict | None = None,
         extensions_enabled: dict | None = None,
-        max_turns: int | None = None,
     ):
         """
         Args:
-            env: extra environment variables to pass to pi.
+            env: extra environment variables for the pi subprocess.
             extensions_enabled: which pi-cost-harness extensions to enable.
                 Maps extension name to bool. If None, all enabled.
-            max_turns: optional turn cap (pi flag --max-turns).
         """
         self._env = env or {}
         self._extensions = extensions_enabled or {}
-        self._max_turns = max_turns
 
     def _build_env(self) -> dict:
         """Build the subprocess environment for pi."""
         env = os.environ.copy()
         env.update(self._env)
-        # Disable interactive features that interfere with headless mode.
-        env["PI_NON_INTERACTIVE"] = "1"
         return env
 
     def _build_cmd(self, prompt: str, model: str) -> list[str]:
-        """Build the pi command line."""
-        cmd = ["pi", "--mode", "json"]
+        """Build the pi command line.
+
+        -p (--print): non-interactive mode — process prompt and exit.
+            Without this, pi launches an interactive TUI that hangs
+            when stdout is piped.
+        --mode json: emit every event as a JSONL line to stdout.
+        --no-session: don't persist session state (ephemeral run).
+        """
+        cmd = ["pi", "-p", "--mode", "json", "--no-session"]
         if model:
             cmd.extend(["--model", model])
-        if self._max_turns:
-            cmd.extend(["--max-turns", str(self._max_turns)])
         cmd.append(prompt)
         return cmd
 
@@ -91,23 +93,52 @@ class PiAdapter(AgentAdapter):
                 timeout=timeout_s,
                 env=env,
             )
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired as exc:
             wall = time.time() - t0
             return AgentResult(
                 success_exit=False,
                 wall_time_s=wall,
-                raw={"timeout": True, "stdout": e.stdout or "", "stderr": e.stderr or ""},
+                raw={"timeout": True, "stdout": exc.stdout or "",
+                     "stderr": exc.stderr or ""},
             )
         wall = time.time() - t0
 
-        return _parse_json_output(proc.stdout, proc.returncode, wall)
+        result = _parse_json_output(proc.stdout, proc.returncode, wall)
+
+        # Surface failures: if pi produced zero assistant events, something
+        # went wrong (auth error, missing model, immediate exit). Attach
+        # stderr and exit code to raw so callers can diagnose.
+        if result.turns == 0 or result.total_tokens == 0:
+            result.raw["stderr"] = proc.stderr
+            result.raw["returncode"] = proc.returncode
+            print(
+                f"[pi-adapter] WARNING: zero-event run "
+                f"(exit={proc.returncode}, turns={result.turns}, "
+                f"tokens={result.total_tokens})",
+                file=sys.stderr,
+            )
+            if proc.stderr:
+                # Print first 20 lines of stderr so the failure is visible.
+                stderr_lines = proc.stderr.strip().splitlines()
+                for line in stderr_lines[:20]:
+                    print(f"[pi-adapter]   {line}", file=sys.stderr)
+
+        return result
 
 
 def _parse_json_output(stdout: str, returncode: int, wall: float) -> AgentResult:
     """Parse Pi's --mode json JSONL output into an AgentResult.
 
-    Pi emits one JSON object per line. We accumulate usage from message_end
-    events and count tool executions and turns from the event stream.
+    Pi emits one JSON object per line. Usage is accumulated from
+    assistant-role message_end events. Tool calls are counted from
+    tool_execution_end events. Turns are counted from turn_end events.
+
+    Pi's usage schema (camelCase):
+        message.usage.input       — input tokens this turn
+        message.usage.output      — output tokens this turn
+        message.usage.cacheRead   — cache-read tokens
+        message.usage.cacheWrite  — cache-creation tokens
+        message.usage.totalTokens — provider-reported total
     """
     input_tokens = 0
     output_tokens = 0
@@ -116,8 +147,9 @@ def _parse_json_output(stdout: str, returncode: int, wall: float) -> AgentResult
     tool_calls = 0
     turns = 0
     first_turn_input = 0
-    turn_index = 0
+    assistant_turn_index = 0
     raw_events = []
+    error_messages = []
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -131,26 +163,34 @@ def _parse_json_output(stdout: str, returncode: int, wall: float) -> AgentResult
         raw_events.append(event)
         event_type = event.get("type", "")
 
-        # Count turns.
         if event_type == "turn_end":
             turns += 1
 
-        # Count tool executions.
         if event_type == "tool_execution_end":
             tool_calls += 1
 
-        # Extract usage from message_end events.
+        # Only count assistant messages — Pi also emits message_end for
+        # user messages, which carry no usage.
         if event_type == "message_end":
-            turn_index += 1
             message = event.get("message", {})
+            if message.get("role") != "assistant":
+                continue
+
+            # Capture error messages for diagnostics.
+            error_msg = message.get("errorMessage")
+            if error_msg:
+                error_messages.append(error_msg)
+
             usage = message.get("usage", {})
+            assistant_turn_index += 1
 
-            turn_input = usage.get("input_tokens", 0)
-            turn_output = usage.get("output_tokens", 0)
-            turn_cache_read = usage.get("cache_read_input_tokens", 0)
-            turn_cache_create = usage.get("cache_creation_input_tokens", 0)
+            # Pi uses camelCase field names, not snake_case.
+            turn_input = usage.get("input", 0)
+            turn_output = usage.get("output", 0)
+            turn_cache_read = usage.get("cacheRead", 0)
+            turn_cache_create = usage.get("cacheWrite", 0)
 
-            if turn_index == 1:
+            if assistant_turn_index == 1:
                 first_turn_input = turn_input
 
             input_tokens += turn_input
@@ -158,12 +198,15 @@ def _parse_json_output(stdout: str, returncode: int, wall: float) -> AgentResult
             cache_read_tokens += turn_cache_read
             cache_creation_tokens += turn_cache_create
 
-    # Decompose: first turn's input is the prompt size (input_tokens field);
-    # subsequent input is working_tokens (intermediate context traffic).
+    # First turn's input = prompt size; subsequent input = working tokens.
     working_tokens = max(0, input_tokens - first_turn_input)
 
+    raw = {"events": raw_events}
+    if error_messages:
+        raw["error_messages"] = error_messages
+
     return AgentResult(
-        success_exit=(returncode == 0),
+        success_exit=(returncode == 0 and not error_messages),
         input_tokens=first_turn_input,
         working_tokens=working_tokens,
         output_tokens=output_tokens,
@@ -173,5 +216,5 @@ def _parse_json_output(stdout: str, returncode: int, wall: float) -> AgentResult
         turns=turns,
         wall_time_s=wall,
         cost_usd=0.0,  # Filled by metering.py from pricing table.
-        raw={"events": raw_events},
+        raw=raw,
     )

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Smoke test: install pi-cost-harness into a testbed repo, run one task
-via the Pi adapter, and confirm the AgentResult contract holds.
+via the Pi adapter, and confirm the AgentResult contract holds AND the
+agent actually did work (tokens > 0, turns >= 1, bug fixed).
 
 Prerequisites:
   - Pi CLI installed (`pi --version` works)
-  - pi-cost-harness installed (`pi install git:...` or `pi install . -l`)
+  - A provider API key set (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
 
 Usage:
     python3 tests/smoke_test.py [testbed_path]
 
 If no testbed_path is given, creates a minimal throwaway repo in /tmp.
 """
-import json
 import os
 import subprocess
 import sys
@@ -24,16 +24,16 @@ from pi_adapter import PiAdapter
 
 
 def _make_testbed(base: Path) -> Path:
-    """Create a minimal Python repo for the smoke test."""
+    """Create a minimal Python repo with a deliberate bug and a test."""
     repo = base / "smoke_testbed"
     repo.mkdir(exist_ok=True)
 
-    # Initialize git repo.
     subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Smoke"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"],
+                   cwd=repo, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Smoke"],
+                   cwd=repo, capture_output=True)
 
-    # Write a simple Python file with a deliberate bug.
     src = repo / "calculator.py"
     src.write_text(
         'def add(a, b):\n'
@@ -41,7 +41,6 @@ def _make_testbed(base: Path) -> Path:
         '    return a - b  # BUG: should be a + b\n'
     )
 
-    # Write a test file.
     test = repo / "test_calculator.py"
     test.write_text(
         'from calculator import add\n'
@@ -50,69 +49,79 @@ def _make_testbed(base: Path) -> Path:
         '    assert add(2, 3) == 5\n'
     )
 
-    # Write a pyproject.toml so test detection works.
     pyproject = repo / "pyproject.toml"
     pyproject.write_text('[tool.pytest.ini_options]\n')
 
-    # Commit so git log works.
     subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"],
+                   cwd=repo, capture_output=True)
 
     return repo
 
 
 def _check_pi_installed() -> bool:
-    """Check if Pi CLI is available."""
     try:
-        result = subprocess.run(["pi", "--version"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["pi", "--version"],
+                                capture_output=True, text=True, timeout=5)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-def _validate_result(result) -> list[str]:
-    """Validate the AgentResult contract. Returns a list of failures."""
+def _test_actually_passes(testbed: Path) -> bool:
+    """Run the testbed's test and return True if it passes."""
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-x", "-q", "test_calculator.py"],
+        cwd=testbed, capture_output=True, text=True, timeout=30,
+    )
+    return result.returncode == 0
+
+
+def _validate_result(result, testbed: Path) -> list[str]:
+    """Validate AgentResult contract AND substantive work. Returns failures."""
     failures = []
 
-    # Required fields must exist.
-    for field in ["success_exit", "input_tokens", "working_tokens",
-                  "output_tokens", "tool_calls", "turns", "wall_time_s",
-                  "cost_usd", "raw"]:
-        if not hasattr(result, field):
-            failures.append(f"Missing field: {field}")
+    # ── Shape checks ──────────────────────────────────────────────────
+    for field_name in ["success_exit", "input_tokens", "working_tokens",
+                       "output_tokens", "tool_calls", "turns", "wall_time_s",
+                       "cost_usd", "raw"]:
+        if not hasattr(result, field_name):
+            failures.append(f"Missing field: {field_name}")
 
-    # Type checks.
     if not isinstance(result.success_exit, bool):
         failures.append(f"success_exit should be bool, got {type(result.success_exit)}")
-    if not isinstance(result.input_tokens, int):
-        failures.append(f"input_tokens should be int, got {type(result.input_tokens)}")
-    if not isinstance(result.output_tokens, int):
-        failures.append(f"output_tokens should be int, got {type(result.output_tokens)}")
-    if not isinstance(result.working_tokens, int):
-        failures.append(f"working_tokens should be int, got {type(result.working_tokens)}")
-    if not isinstance(result.tool_calls, int):
-        failures.append(f"tool_calls should be int, got {type(result.tool_calls)}")
-    if not isinstance(result.turns, int):
-        failures.append(f"turns should be int, got {type(result.turns)}")
-    if not isinstance(result.wall_time_s, float):
-        failures.append(f"wall_time_s should be float, got {type(result.wall_time_s)}")
     if not isinstance(result.raw, dict):
         failures.append(f"raw should be dict, got {type(result.raw)}")
 
-    # Semantic checks.
-    if result.wall_time_s <= 0:
-        failures.append(f"wall_time_s should be positive, got {result.wall_time_s}")
-    if result.input_tokens < 0:
-        failures.append(f"input_tokens should be non-negative, got {result.input_tokens}")
-    if result.working_tokens < 0:
-        failures.append(f"working_tokens should be non-negative, got {result.working_tokens}")
-
-    # total_tokens property.
     expected_total = result.input_tokens + result.working_tokens + result.output_tokens
     if result.total_tokens != expected_total:
         failures.append(
             f"total_tokens mismatch: {result.total_tokens} != "
-            f"{result.input_tokens} + {result.working_tokens} + {result.output_tokens}"
+            f"{result.input_tokens}+{result.working_tokens}+{result.output_tokens}"
+        )
+
+    # ── Substantive checks (the run actually did something) ───────────
+    if result.turns < 1:
+        failures.append(f"turns must be >= 1, got {result.turns}")
+    if result.total_tokens <= 0:
+        failures.append(f"total_tokens must be > 0, got {result.total_tokens}")
+    if result.input_tokens <= 0:
+        failures.append(f"input_tokens must be > 0, got {result.input_tokens}")
+    if result.output_tokens <= 0:
+        failures.append(f"output_tokens must be > 0, got {result.output_tokens}")
+    if result.wall_time_s <= 0:
+        failures.append(f"wall_time_s must be > 0, got {result.wall_time_s}")
+
+    # ── Error message check ───────────────────────────────────────────
+    error_messages = result.raw.get("error_messages", [])
+    if error_messages:
+        failures.append(f"Pi returned error(s): {error_messages[0][:120]}")
+
+    # ── Functional check: did the agent actually fix the bug? ─────────
+    if not _test_actually_passes(testbed):
+        failures.append(
+            "Functional check FAILED: test_calculator.py still fails after "
+            "the agent ran — the bug was not fixed."
         )
 
     return failures
@@ -121,10 +130,8 @@ def _validate_result(result) -> list[str]:
 def main():
     print("=== pi-cost-harness smoke test ===\n")
 
-    # Check Pi is installed.
     if not _check_pi_installed():
         print("SKIP: Pi CLI not installed. Install from https://pi.dev")
-        print("      The adapter unit tests (in llm-cost-harness) pass without Pi.")
         sys.exit(0)
 
     # Set up testbed.
@@ -135,14 +142,21 @@ def main():
         testbed = _make_testbed(Path(tmpdir))
         print(f"Created testbed at: {testbed}")
 
+    # Confirm the test fails BEFORE the agent runs.
+    if _test_actually_passes(testbed):
+        print("ERROR: test_calculator.py already passes before agent run — "
+              "testbed is broken.")
+        sys.exit(1)
+    print("Pre-check: test_calculator.py fails as expected (bug present).\n")
+
     # Run one task via the adapter.
-    print(f"\nRunning Pi on: {testbed}")
+    print(f"Running Pi on: {testbed}")
     prompt = (
         "Fix the bug in calculator.py so that test_calculator.py passes. "
-        "Run the tests to confirm."
+        "Run `python -m pytest -x -q test_calculator.py` to confirm."
     )
 
-    adapter = PiAdapter(max_turns=10)
+    adapter = PiAdapter()
     result = adapter.run(
         prompt=prompt,
         workdir=testbed,
@@ -150,7 +164,7 @@ def main():
         timeout_s=120,
     )
 
-    # Validate result contract.
+    # Report.
     print(f"\nResult:")
     print(f"  success_exit:     {result.success_exit}")
     print(f"  input_tokens:     {result.input_tokens}")
@@ -165,14 +179,27 @@ def main():
     print(f"  cost_usd:         {result.cost_usd}")
     print(f"  raw events:       {len(result.raw.get('events', []))}")
 
-    failures = _validate_result(result)
+    # Print stderr/errors if present.
+    stderr = result.raw.get("stderr", "")
+    if stderr:
+        print(f"\n  stderr (first 10 lines):")
+        for line in stderr.strip().splitlines()[:10]:
+            print(f"    {line}")
+
+    error_messages = result.raw.get("error_messages", [])
+    if error_messages:
+        print(f"\n  error_messages:")
+        for msg in error_messages:
+            print(f"    {msg[:200]}")
+
+    failures = _validate_result(result, testbed)
     if failures:
-        print(f"\nFAILED — contract violations:")
+        print(f"\nFAILED — {len(failures)} violation(s):")
         for f in failures:
             print(f"  ✗ {f}")
         sys.exit(1)
     else:
-        print(f"\nPASS — AgentResult contract holds.")
+        print(f"\nPASS — AgentResult contract holds, bug was fixed.")
         sys.exit(0)
 
 
