@@ -20,9 +20,12 @@ import subprocess
 import time
 from pathlib import Path
 
-# Import from the benchmark harness. When used standalone, these must be
-# on PYTHONPATH (e.g. via `PYTHONPATH=../llm-cost-harness python ...`).
-from harness.adapters.base import AgentAdapter, AgentResult
+# Prefer the vendored copy so this works standalone (no benchmark repo
+# on PYTHONPATH). Falls back to the canonical harness import if available.
+try:
+    from .base import AgentAdapter, AgentResult
+except ImportError:
+    from base import AgentAdapter, AgentResult
 
 
 class PiAdapter(AgentAdapter):

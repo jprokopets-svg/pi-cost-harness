@@ -5,10 +5,9 @@ via the Pi adapter, and confirm the AgentResult contract holds.
 Prerequisites:
   - Pi CLI installed (`pi --version` works)
   - pi-cost-harness installed (`pi install git:...` or `pi install . -l`)
-  - PYTHONPATH includes the llm-cost-harness repo for the adapter import
 
 Usage:
-    PYTHONPATH=../llm-cost-harness python3 tests/smoke_test.py [testbed_path]
+    python3 tests/smoke_test.py [testbed_path]
 
 If no testbed_path is given, creates a minimal throwaway repo in /tmp.
 """
@@ -19,12 +18,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-# The adapter can be imported from either location.
-try:
-    from harness.adapters.pi import PiAdapter
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adapter"))
-    from pi_adapter import PiAdapter
+# Import from the vendored adapter in this repo (no benchmark repo needed).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adapter"))
+from pi_adapter import PiAdapter
 
 
 def _make_testbed(base: Path) -> Path:
