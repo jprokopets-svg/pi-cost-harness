@@ -25,9 +25,22 @@ function loadConfig(cwd: string): Record<string, boolean> {
   return {};
 }
 
+function isGitRepo(cwd: string): boolean {
+  try {
+    execSync("git rev-parse --is-inside-work-tree", {
+      cwd, encoding: "utf-8", stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function currentHead(cwd: string): string | null {
   try {
-    return execSync("git rev-parse HEAD", { cwd, encoding: "utf-8" }).trim();
+    return execSync("git rev-parse HEAD", {
+      cwd, encoding: "utf-8", stdio: "pipe",
+    }).trim();
   } catch {
     return null;
   }
@@ -53,16 +66,28 @@ function generateBriefing(cwd: string): string {
     }
   }
 
-  // Fallback: git log only.
+  // Not a git repo (or Python unavailable): file-map only, no git section.
+  // We deliberately skip the git log to avoid misleading "(no git history)"
+  // and to prevent git stderr from leaking into the PI process.
+  if (!isGitRepo(cwd)) {
+    return [
+      "# briefing.md — pre-computed context\n",
+      "Read this first. Go directly to editing.\n",
+      "(workspace is not a git repository — no commit history available)",
+    ].join("\n");
+  }
+
+  // Fallback: git log only (we know it's a git repo at this point).
   let gitLog = "(no git history)";
   try {
     gitLog = execSync("git log --oneline -10", {
       cwd,
       encoding: "utf-8",
       timeout: 5_000,
+      stdio: "pipe",
     }).trim();
   } catch {
-    // Not a git repo or git unavailable.
+    // git unavailable or empty repo.
   }
 
   return [

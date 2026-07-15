@@ -104,20 +104,25 @@ export default function (pi: ExtensionAPI) {
     // This is the "done" message after verify passed. Trigger the review.
     reviewTriggered = true;
 
-    // Capture the current diff.
+    // Capture the current diff (only in git repos; stdio: "pipe" prevents
+    // git's stderr from leaking into the PI process on non-git workspaces).
     let diff = "";
     try {
+      execSync("git rev-parse --is-inside-work-tree", {
+        cwd: ctx.cwd, stdio: "pipe",
+      });
       diff = execSync("git diff HEAD", {
         cwd: ctx.cwd,
         encoding: "utf-8",
         timeout: 10_000,
+        stdio: "pipe",
       }).slice(0, 4000);
     } catch {
-      diff = "(could not capture diff)";
+      diff = "";
     }
 
     if (!diff.trim()) {
-      // No changes — nothing to review.
+      // Not a git repo, or no staged changes — nothing to review.
       return;
     }
 
@@ -143,7 +148,10 @@ export default function (pi: ExtensionAPI) {
       `One review round only — do not loop.`,
     ].join("\n");
 
-    pi.sendUserMessage(reviewPrompt);
+    // Use streamingBehavior: 'followUp' to queue the review message rather than
+    // injecting it during message_end processing (would cause "Agent is already
+    // processing" and a SIGTERM crash).
+    pi.sendUserMessage(reviewPrompt, { streamingBehavior: "followUp" });
   });
 
   // Compact context before the review round: drop implementation reasoning,

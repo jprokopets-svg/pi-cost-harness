@@ -116,16 +116,21 @@ export default function (pi: ExtensionAPI) {
     }
 
     verifyLoopsUsed++;
+    // Use streamingBehavior: 'followUp' so the message is queued rather than
+    // injected while turn_end is still being processed. Without this, PI throws
+    // "Agent is already processing" and kills itself with SIGTERM.
     if (verifyLoopsUsed >= maxLoops) {
       pi.sendUserMessage(
         `[step-verify] Tests FAILED after ${verifyLoopsUsed}/${maxLoops} attempts. ` +
-        `Report what you tried and why it's still failing, then stop.`
+        `Report what you tried and why it's still failing, then stop.`,
+        { streamingBehavior: "followUp" }
       );
     } else {
       const lastLines = output.trim().split("\n").slice(-30).join("\n");
       pi.sendUserMessage(
         `[step-verify ${verifyLoopsUsed}/${maxLoops}] Tests FAILED. Fix and try again.\n\n` +
-        `\`\`\`\n${lastLines}\n\`\`\``
+        `\`\`\`\n${lastLines}\n\`\`\``,
+        { streamingBehavior: "followUp" }
       );
     }
 
